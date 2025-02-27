@@ -1,7 +1,9 @@
 function [dff, dff_reg, fmean_raw, fmean_reg, pred_shift, opt_loss_xyz, grid_loss_xyz, grid_pos_xyz] = fcn_Comp3D_main(ref, raw, ref_pos, pixel_list, sin_num)
-% ref: M x N x stack
-% raw: M x N x Frame
+% ref: M x N x Stack
+% raw: M x N x Frame, need to be double
 % ref_pos: stack x 1(Z), 3(XYZ)
+% pixel_list: 1 x ROI (cell structure)
+% sin_num: integer, how many dimension kept
 
 if size(ref_pos,2) == 3
     dim = '3d'; % 3D (X,Y,Z) correction
