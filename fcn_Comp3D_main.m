@@ -1,114 +1,100 @@
-function [dff, dff_reg, fmean_raw, fmean_reg, pred_shift, opt_loss_xyz, grid_loss_xyz, grid_pos_xyz] = fcn_Comp3D_main(ref, raw, ref_pos, pixel_list, sin_num)
-% ref: M x N x Stack
-% raw: M x N x Frame, need to be double
-% ref_pos: stack x 1(Z), 3(XYZ)
+function [dff, dff_reg, fmean_raw, fmean_reg, pred_shift, opt_loss_xyz, grid_loss_xyz, grid_pos_xyz] = fcn_Comp3D_main(lib, raw, lib_pos, pixel_list, sin_num)
+% lib: H x W x stackNum
+% raw: H x W x Frame; data type, double
+% lib_pos: stackNum x 1(Z), 3(XYZ)
 % pixel_list: 1 x ROI (cell structure)
-% sin_num: integer, how many dimension kept
+% sin_num: number of dimensions wants to keep in SVD, integer
 
-if size(ref_pos,2) == 3
+if size(lib_pos,2) == 3
     dim = '3d'; % 3D (X,Y,Z) correction
-elseif size(ref_pos,2) == 1
+elseif size(lib_pos,2) == 1
     dim = '1d'; % 1D (Z) correction
 else
-    error('Error. \nInput position dimension must be 1D (z) or 3D (x,y,z) , not %iD.',size(ref_pos,2));
+    error('Error. \nInput position dimension must be 1D (z) or 3D (x,y,z) , not %iD.',size(lib_pos,2));
 end
-if ~exist('dist_type', 'var')
-    dist_type = 'cosine'; % distance metric, if not specified, cosine distance
-end
-[ref_feature, source_feature, ft_map] = fcn_SVD(double(ref), double(raw), sin_num);
-init_num = 10;
-[pred_shift, opt_loss_xyz, grid_loss_xyz, grid_pos_xyz] = fcn_xyz_interp_rbf(ref_feature,source_feature,ref_pos,dist_type,dim,init_num);
 
+addpath('RBF MATLAB');
+dist_type = 'cosine'; % distance metric, if not specified, cosine distance
+init_num = 10; % number of predicted movement as initial movement 
+
+% Main
+% step 1: extracting features using library stacks through SVD dimension reduction
+[lib_feature, source_feature, ft_map] = fcn_SVD(double(lib), double(raw), sin_num);
+% step 2: finding most similar movement
+[pred_shift, opt_loss_xyz, grid_loss_xyz, grid_pos_xyz] = fcn_xyz_interp_rbf(lib_feature, source_feature, lib_pos, dist_type, dim, init_num);
+% step 3: compensaion
 fmean_raw = (fcn_roi_measure(raw, pixel_list));
-fmean_ref = (fcn_roi_measure(ref, pixel_list));
+fmean_lib = (fcn_roi_measure(lib, pixel_list));
 dff = fmean_raw./mean(fmean_raw);
-
-[reg_norm, fmean_raw_pred] = fcn_comp_dff(fmean_ref, fmean_raw, pixel_list, ref_pos, pred_shift);
+[reg_norm, fmean_raw_pred] = fcn_comp_dff(fmean_lib, fmean_raw, pixel_list, lib_pos, pred_shift);
 dff_reg = dff./reg_norm;
 fmean_reg = fmean_raw./reg_norm;
-
 end
 
-
-function [ref_feature, source_feature, V] = fcn_SVD(lib, source, singularNum)
-    % Library size: M * N * Position
-    % Source size: M * N * Frame
-    % SingularNum: integer
+function [lib_feature, source_feature, V] = fcn_SVD(lib, source, singularNum)
     libSize = size(lib);
     sourceSize = size(source);
-    if length(libSize)>2
-        lib = reshape(lib, [], libSize(3)).';          % ref size: Position * MN
-        source = reshape(source, [], sourceSize(3)).'; % source size: Frame * MN
-    else
+    if length(libSize)>2 % Image
+        lib = reshape(lib, [], libSize(3)).';          % stackNum x HW
+        source = reshape(source, [], sourceSize(3)).'; % Frame x HW
+    else % vector
         lib = lib.';
         source = source.';
     end
-    % Find library bases that encode movement info
+    % Find library bases that encode displacement info
     [U,S,V] = svds(lib, singularNum);
     % Project both lib and source onto lib bases
-    ref_feature = lib * V;          % lib_feature size: Position * singularNum
-    source_feature = source * V;    % source_feature size: Frame * singularNum
+    lib_feature = lib * V;          % stackNum x sin_num
+    source_feature = source * V;    % Frame x sin_num
     if length(libSize)>2
-        V = reshape(V, libSize(1), libSize(2), []); % Bases size: M x N x singularNum
+        V = reshape(V, libSize(1), libSize(2), []); % image bases, H x W x sin_num
     end
 end
 
 
-function [x_opt, opt_loss, grid_loss, x_grid] = fcn_xyz_interp_rbf(lib_feature,source_feature,ref_pos,dist_type,dim,init_num)
-% addpath('\\120.126.51.3\data\John\code\AddOn\RBF MATLAB');
-
-% lib_feature: Position x singularNum
-% source feature: Frame x singularNum
-% ref_pos: Position x 3
-% init_num: The number of previous predicted movement as initial movement 
+function [x_opt, opt_loss, grid_loss, x_grid] = fcn_xyz_interp_rbf(lib_feature,source_feature,lib_pos,dist_type,dim,init_num)
 sSize = size(source_feature);
-if strcmp(dim,'3d')
+if strcmp(dim,'3d') % Comp3D
     x0 = zeros(sSize(1),3);
     x_grid = zeros(sSize(1),3);
     x_opt = zeros(sSize(1),3);
-elseif strcmp(dim,'1d')
+elseif strcmp(dim,'1d') % CompZ
     x0 = zeros(sSize(1),1);
     x_grid = zeros(sSize(1),1);
     x_opt = zeros(sSize(1),1);
 end
     
-grid_loss = zeros(sSize(1),1);
+grid_loss = zeros(sSize(1),1); 
 opt_loss = zeros(sSize(1), 1);
-outside_alarm = false(sSize(1), 1);
-comp_vec = zeros(sSize(1),sSize(2));
+outside_alarm = false(sSize(1), 1); % true if the predicted movement is beyond max./min. of library position
 if ~exist('init_num', 'var')
-    init_num = sSize(1); % if not specified, predict based on nearest library position
+    init_num = sSize(1); % if init_num not specified, predict based on nearest library position
 end
 assert(init_num <= sSize(1));
 
 % create interpolation function
 F = cell(sSize(2),1);
 for a = 1:sSize(2)
-    F{a} = rbfcreate(ref_pos', lib_feature(:,a)');
+    F{a} = rbfcreate(lib_pos', lib_feature(:,a)');
 end
 
-% Closest position predicted by library grid
+% predict closest position by library grid
 for m = 1:init_num
-    x_grid(m,:) = fcn_init_by_grid(lib_feature, source_feature(m,:), ref_pos);
+    x_grid(m,:) = fcn_init_by_grid(lib_feature, source_feature(m,:), lib_pos);
     grid_loss(m) = cos_loss_fcn(x_grid(m,:), F, source_feature(m,:), sSize);
 end
 
 % optimization
-% options = optimset('MaxFunEvals',1000,'TolX',2e-6,'TolFun',2e-6);
 options = optimset('MaxFunEvals',1000,'TolX',1e-4,'TolFun',1e-4);
     for j = 1:sSize(1)
         if j <= init_num
             x0(j,:) = x_grid(j,:);
         else
             x0(j,:) = mean(x_opt(j-init_num:j-1,:)); % initial position based on average of previous position
-            outside_alarm(j) =  fcn_out_of_range(x_opt(j-1,:),max(ref_pos,[],'all'),min(ref_pos,[],'all'));
+            outside_alarm(j) =  fcn_out_of_range(x_opt(j-1,:),max(lib_pos,[],'all'),min(lib_pos,[],'all'));
         end
         myfun = @(x)cos_loss_fcn(x,F,source_feature(j,:),sSize,dist_type); % calculate similarity
         [x_opt(j,:), opt_loss(j)] = fminsearch(myfun,x0(j,:),options); % predicted position
-%         for k = 1:sSize(2)
-%             f = F{k,1}; 
-%             comp_vec(j,k) = rbfinterp([0,0,0]',f) - rbfinterp(x_opt(j,:)',f); % compensated features
-%         end
     if rem(j,1000) == 0; disp(j); end
     end
 end
@@ -125,16 +111,16 @@ function x2 = cos_loss_fcn(x,F,source_feature,sSize,dist_type)
     x2 = pdist2(v,source_feature,dist_type);
 end
 
-function x0 = fcn_init_by_grid(ref_feature,source_feature,ref_pos,dist_type)
+function x0 = fcn_init_by_grid(lib_feature,source_feature,lib_pos,dist_type)
     if ~exist('dist_type', 'var')
         dist_type = 'cosine';
     end
-    err = zeros(size(ref_feature,1),1);
-    for b = 1:size(ref_feature,1)
-        err(b) = pdist2(ref_feature(b,:), source_feature, dist_type);
+    err = zeros(size(lib_feature,1),1);
+    for b = 1:size(lib_feature,1)
+        err(b) = pdist2(lib_feature(b,:), source_feature, dist_type);
     end
     [~,I] = min(err);
-    x0 = ref_pos(I,:);
+    x0 = lib_pos(I,:);
 end
 
 function out_index = fcn_out_of_range(x,pos_max,pos_min)
@@ -146,24 +132,24 @@ function out_index = fcn_out_of_range(x,pos_max,pos_min)
     end
 end
 
-function [reg_norm, fmean_raw_pred] = fcn_comp_dff(fmean_ref, fmean_raw, pixel_list, ref_pos, pred_shift)
+function [reg_norm, fmean_raw_pred] = fcn_comp_dff(fmean_lib, fmean_raw, pixel_list, lib_pos, pred_shift)
 % Calculate baseline fluorescence after motion, and divided by measured fluorescence
-% fmean_ref: Position x ROI
+% fmean_lib: stackNum x ROI
 % fmean_raw: Frame x ROI
 F = cell(length(pixel_list),1);
 for a = 1:length(pixel_list)
-    F{a} = rbfcreate(ref_pos', fmean_ref(:,a)');
+    F{a} = rbfcreate(lib_pos', fmean_lib(:,a)');
 end
 fmean_raw_pred = zeros(size(fmean_raw));
 
 for j = 1:size(fmean_raw, 1) % frame
-    for k = 1:length(pixel_list) % ROI#
+    for k = 1:length(pixel_list) % ROI
         f = F{k,1}; 
         fmean_raw_pred(j,k) = rbfinterp(pred_shift(j,:)', f); 
     end
     if rem(j,1000) == 0; disp(j); end
 end
-reg_norm = fmean_raw_pred./mean(fmean_ref,1);
+reg_norm = fmean_raw_pred./mean(fmean_lib,1);
 
 end
 
